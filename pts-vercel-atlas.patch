@@ -1,0 +1,774 @@
+From 38f6cee24db049c78fc256499f789edf0aaea27f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 14 Nov 2026 05:47:06 +0530
+Subject: [PATCH] Make app deployable on Vercel with MongoDB Atlas and safe
+ admin seeding
+
+- Add Vercel serverless entry (api/index.ts) and vercel.json rewrites; split
+  Express app into server/app.ts so server.ts and Vercel share it
+- Require MONGODB_URI on Vercel/production; never fall back to the embedded DB
+- Make admin seeding idempotent: no longer wipes admins, interns, projects,
+  reports or notifications on every start; existing passwords are kept unless
+  ADMIN_SYNC_PASSWORDS=true
+- Read admin credentials from env only (bcrypt-hashed in the DB); remove
+  plaintext passwords and the default JWT secret from source and .env.example
+- Stop tracking the embedded .mongodb_data files
+- Use explicit .js extensions in server imports for Node ESM
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016NcWNgDoCT2tCvdvW5detW
+---
+ .env.example                             |  42 ++++---
+ .gitignore                               |   4 +
+ api/index.ts                             |  34 ++++++
+ server.ts                                |  49 +--------
+ server/app.ts                            |  44 ++++++++
+ server/db/connection.ts                  |  11 +-
+ server/middleware/auth.ts                |  13 ++-
+ server/routes/activityRoutes.ts          |  14 +--
+ server/routes/adminRoutes.ts             |   4 +-
+ server/routes/assignmentRoutes.ts        |  14 +--
+ server/routes/authRoutes.ts              |   8 +-
+ server/routes/emailRoutes.ts             |   6 +-
+ server/routes/exportRoutes.ts            |   4 +-
+ server/routes/fileRoutes.ts              |   2 +-
+ server/routes/internRoutes.ts            |  10 +-
+ server/routes/notificationRoutes.ts      |   4 +-
+ server/routes/projectRoutes.ts           |  10 +-
+ server/routes/reportRoutes.ts            |  16 +--
+ server/routes/reportingCalendarRoutes.ts |   4 +-
+ server/services/activityLogger.ts        |   4 +-
+ server/services/emailService.ts          |   2 +-
+ server/services/excelService.ts          |   8 +-
+ server/services/seedService.ts           | 134 +++++++++++------------
+ vercel.json                              |   9 ++
+ 24 files changed, 252 insertions(+), 198 deletions(-)
+ create mode 100644 api/index.ts
+ create mode 100644 server/app.ts
+ create mode 100644 vercel.json
+
+diff --git a/.env.example b/.env.example
+index 6bf883a..d8c84de 100644
+--- a/.env.example
++++ b/.env.example
+@@ -1,31 +1,27 @@
+-# GEMINI_API_KEY: Required for Gemini AI API calls.
+-# AI Studio automatically injects this at runtime from user secrets.
+-# Users configure this via the Secrets panel in the AI Studio UI.
+-GEMINI_API_KEY="MY_GEMINI_API_KEY"
+-
+-# APP_URL: The URL where this applet is hosted.
+-# AI Studio automatically injects this at runtime with the Cloud Run service URL.
+-# Used for self-referential links, OAuth callbacks, and API endpoints.
+-APP_URL="MY_APP_URL"
+-
+-# MONGODB_URI: Optional MongoDB connection string.
+-# If not provided, an embedded persistent MongoDB instance is automatically initialized.
++# MongoDB Atlas connection string (required on Vercel).
++# Locally, if left empty, an embedded MongoDB is started instead.
+ MONGODB_URI=""
+ 
+-# JWT_SECRET: Secret for signing JWT authentication tokens.
+-JWT_SECRET="nexus_enterprise_jwt_secret_key_2027"
++# Secret used to sign login tokens. Use a long random value (e.g. `openssl rand -hex 32`).
++JWT_SECRET=""
+ 
+-# Startup Administrator Credentials (seeded on first boot)
+-# Admin 1 (CEO)
+-ADMIN1_NAME="Y D Mahendhra"
++# Optional
++GEMINI_API_KEY=""
++APP_URL=""
++
++# Admin accounts, created in MongoDB on first start if they don't exist yet.
++# Passwords are stored hashed (bcrypt) in the database. Never commit real values.
+ ADMIN1_ID="PTS-CEO-001"
++ADMIN1_NAME="Y D Mahendhra"
+ ADMIN1_USERNAME="Mahendhra"
+-ADMIN1_EMAIL="mahendhra2005@gamil.com"
+-ADMIN1_PASSWORD="ydm@1962"
++ADMIN1_EMAIL=""
++ADMIN1_PASSWORD=""
+ 
+-# Admin 2 (COO)
+-ADMIN2_NAME="P Praveen Kumar"
+ ADMIN2_ID="PTS-COO-001"
++ADMIN2_NAME="P Praveen Kumar"
+ ADMIN2_USERNAME="Praveen"
+-ADMIN2_EMAIL="praveenpraba399@gamil.com"
+-ADMIN2_PASSWORD="sasipravveen"
++ADMIN2_EMAIL=""
++ADMIN2_PASSWORD=""
++
++# Set to "true" for one deploy to overwrite existing admin passwords with the values above.
++ADMIN_SYNC_PASSWORDS="false"
+diff --git a/.gitignore b/.gitignore
+index 5a86d2a..da5a5d8 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -6,3 +6,7 @@ coverage/
+ *.log
+ .env*
+ !.env.example
++
++.mongodb_data/
++api/*.js
++.vercel
+diff --git a/api/index.ts b/api/index.ts
+new file mode 100644
+index 0000000..6b1a53f
+--- /dev/null
++++ b/api/index.ts
+@@ -0,0 +1,34 @@
++import type { IncomingMessage, ServerResponse } from 'http';
++import app from '../server/app.js';
++import { connectDB } from '../server/db/connection.js';
++import { seedDatabase } from '../server/services/seedService.js';
++
++// Vercel serverless entry: every /api/* request is rewritten here (see vercel.json).
++// The DB connection and admin seeding run once per warm instance.
++let ready: Promise<void> | null = null;
++
++function init(): Promise<void> {
++  if (!ready) {
++    ready = (async () => {
++      await connectDB();
++      await seedDatabase();
++    })().catch((err) => {
++      ready = null; // allow a retry on the next request
++      throw err;
++    });
++  }
++  return ready;
++}
++
++export default async function handler(req: IncomingMessage, res: ServerResponse) {
++  try {
++    await init();
++  } catch (err: any) {
++    console.error('[Vercel] Initialization failed:', err?.message || err);
++    res.statusCode = 503;
++    res.setHeader('Content-Type', 'application/json');
++    res.end(JSON.stringify({ success: false, message: 'Database is unavailable. Please try again shortly.' }));
++    return;
++  }
++  return (app as any)(req, res);
++}
+diff --git a/server.ts b/server.ts
+index 8365f59..aa783cd 100644
+--- a/server.ts
++++ b/server.ts
+@@ -2,61 +2,20 @@ import express from 'express';
+ import http from 'http';
+ import path from 'path';
+ import dotenv from 'dotenv';
+-import { connectDB } from './server/db/connection';
+-import { seedDatabase } from './server/services/seedService';
+-import { initSocketIO } from './server/socket';
++import { connectDB } from './server/db/connection.js';
++import { seedDatabase } from './server/services/seedService.js';
++import { initSocketIO } from './server/socket.js';
+ 
+-// Route imports
+-import authRoutes from './server/routes/authRoutes';
+-import adminRoutes from './server/routes/adminRoutes';
+-import internRoutes from './server/routes/internRoutes';
+-import projectRoutes from './server/routes/projectRoutes';
+-import assignmentRoutes from './server/routes/assignmentRoutes';
+-import reportRoutes from './server/routes/reportRoutes';
+-import reportingCalendarRoutes from './server/routes/reportingCalendarRoutes';
+-import notificationRoutes from './server/routes/notificationRoutes';
+-import exportRoutes from './server/routes/exportRoutes';
+-import fileRoutes from './server/routes/fileRoutes';
+-import emailRoutes from './server/routes/emailRoutes';
+-import activityRoutes from './server/routes/activityRoutes';
++import app from './server/app.js';
+ 
+ dotenv.config();
+ 
+-const app = express();
+ const server = http.createServer(app);
+ const PORT = 3000;
+ 
+-// Body parsing middleware
+-app.use(express.json({ limit: '50mb' }));
+-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+-
+ // Initialize Socket.IO gateway
+ initSocketIO(server);
+ 
+-// Mount REST API Endpoints
+-app.use('/api/auth', authRoutes);
+-app.use('/api/admin', adminRoutes);
+-app.use('/api/activity', activityRoutes);
+-app.use('/api/interns', internRoutes);
+-app.use('/api/projects', projectRoutes);
+-app.use('/api/assignments', assignmentRoutes);
+-app.use('/api/reports', reportRoutes);
+-app.use('/api/reporting', reportingCalendarRoutes);
+-app.use('/api/notifications', notificationRoutes);
+-app.use('/api/export', exportRoutes);
+-app.use('/api/files', fileRoutes);
+-app.use('/api/emails', emailRoutes);
+-
+-// Health check endpoint
+-app.get('/api/health', (_req, res) => {
+-  res.json({
+-    status: 'healthy',
+-    system: 'NexusProject Full-Stack Server',
+-    database: 'MongoDB GridFS Operational',
+-    timestamp: new Date().toISOString(),
+-  });
+-});
+-
+ async function startServer() {
+   try {
+     // 1. Connect to MongoDB (or embedded engine)
+diff --git a/server/app.ts b/server/app.ts
+new file mode 100644
+index 0000000..97f7a97
+--- /dev/null
++++ b/server/app.ts
+@@ -0,0 +1,44 @@
++import express from 'express';
++import authRoutes from './routes/authRoutes.js';
++import adminRoutes from './routes/adminRoutes.js';
++import internRoutes from './routes/internRoutes.js';
++import projectRoutes from './routes/projectRoutes.js';
++import assignmentRoutes from './routes/assignmentRoutes.js';
++import reportRoutes from './routes/reportRoutes.js';
++import reportingCalendarRoutes from './routes/reportingCalendarRoutes.js';
++import notificationRoutes from './routes/notificationRoutes.js';
++import exportRoutes from './routes/exportRoutes.js';
++import fileRoutes from './routes/fileRoutes.js';
++import emailRoutes from './routes/emailRoutes.js';
++import activityRoutes from './routes/activityRoutes.js';
++
++export const app = express();
++
++app.use(express.json({ limit: '50mb' }));
++app.use(express.urlencoded({ extended: true, limit: '50mb' }));
++
++// Mount REST API Endpoints
++app.use('/api/auth', authRoutes);
++app.use('/api/admin', adminRoutes);
++app.use('/api/activity', activityRoutes);
++app.use('/api/interns', internRoutes);
++app.use('/api/projects', projectRoutes);
++app.use('/api/assignments', assignmentRoutes);
++app.use('/api/reports', reportRoutes);
++app.use('/api/reporting', reportingCalendarRoutes);
++app.use('/api/notifications', notificationRoutes);
++app.use('/api/export', exportRoutes);
++app.use('/api/files', fileRoutes);
++app.use('/api/emails', emailRoutes);
++
++// Health check endpoint
++app.get('/api/health', (_req, res) => {
++  res.json({
++    status: 'healthy',
++    system: 'NexusProject Full-Stack Server',
++    database: 'MongoDB GridFS Operational',
++    timestamp: new Date().toISOString(),
++  });
++});
++
++export default app;
+diff --git a/server/db/connection.ts b/server/db/connection.ts
+index 038b608..9285869 100644
+--- a/server/db/connection.ts
++++ b/server/db/connection.ts
+@@ -75,7 +75,8 @@ async function startEmbeddedMongoDB(): Promise<void> {
+   const dbDir = path.resolve(process.cwd(), '.mongodb_data');
+   sanitizeMongoDataDir(dbDir);
+ 
+-  const { MongoMemoryServer } = await import('mongodb-memory-server');
++  const memModule = 'mongodb-memory-server'; // non-literal so bundlers/tracers skip it on Vercel
++  const { MongoMemoryServer } = await import(memModule);
+ 
+   // Attempt 1: Persistent WiredTiger storage on disk
+   try {
+@@ -136,6 +137,10 @@ export async function connectDB(): Promise<typeof mongoose> {
+   const rawUri = process.env.MONGODB_URI;
+   let connected = false;
+ 
++  if (process.env.VERCEL && !isValidMongoUri(rawUri)) {
++    throw new Error('MONGODB_URI is missing or invalid. Set your MongoDB Atlas connection string in Vercel.');
++  }
++
+   if (isValidMongoUri(rawUri)) {
+     const uri = rawUri!.trim();
+     console.log('[MongoDB] Attempting connection to configured MONGODB_URI...');
+@@ -147,6 +152,10 @@ export async function connectDB(): Promise<typeof mongoose> {
+       console.log('[MongoDB] Connected successfully to configured MONGODB_URI.');
+       connected = true;
+     } catch (err: any) {
++      if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
++        // Never fall back to a throwaway database in production.
++        throw err;
++      }
+       console.warn(`[MongoDB] Could not connect to configured MONGODB_URI (${err?.message || err}). Falling back to embedded MongoDB...`);
+       connected = false;
+     }
+diff --git a/server/middleware/auth.ts b/server/middleware/auth.ts
+index 9018be9..6b42e84 100644
+--- a/server/middleware/auth.ts
++++ b/server/middleware/auth.ts
+@@ -1,7 +1,14 @@
+ import { Request, Response, NextFunction } from 'express';
+ import jwt from 'jsonwebtoken';
+ 
+-const JWT_SECRET = process.env.JWT_SECRET || 'nexus_enterprise_jwt_secret_key_2027';
++const JWT_SECRET = process.env.JWT_SECRET || '';
++if (!JWT_SECRET) {
++  if (process.env.NODE_ENV === 'production' || process.env.VERCEL) {
++    throw new Error('JWT_SECRET environment variable is required.');
++  }
++  console.warn('[Auth] JWT_SECRET not set; using an insecure development-only secret.');
++}
++const SIGNING_SECRET = JWT_SECRET || 'dev-only-insecure-secret';
+ 
+ export interface AuthUser {
+   id: string; // adminId or internId
+@@ -20,12 +27,12 @@ declare global {
+ }
+ 
+ export function generateToken(user: AuthUser): string {
+-  return jwt.sign(user, JWT_SECRET, { expiresIn: '7d' });
++  return jwt.sign(user, SIGNING_SECRET, { expiresIn: '7d' });
+ }
+ 
+ export function verifyToken(token: string): AuthUser | null {
+   try {
+-    return jwt.verify(token, JWT_SECRET) as AuthUser;
++    return jwt.verify(token, SIGNING_SECRET) as AuthUser;
+   } catch {
+     return null;
+   }
+diff --git a/server/routes/activityRoutes.ts b/server/routes/activityRoutes.ts
+index e26e225..6622089 100644
+--- a/server/routes/activityRoutes.ts
++++ b/server/routes/activityRoutes.ts
+@@ -1,12 +1,12 @@
+ import { Router, Request, Response } from 'express';
+ import mongoose from 'mongoose';
+-import { ActivityLog, ActivityCategory, ActivitySeverity } from '../models/ActivityLog';
+-import { InternCheckIn, CheckInStatus, WorkMode } from '../models/InternCheckIn';
+-import { Intern } from '../models/Intern';
+-import { Project } from '../models/Project';
+-import { authenticate, requireAdmin } from '../middleware/auth';
+-import { logActivity, logInternCheckInEvent, logInternCheckOutEvent } from '../services/activityLogger';
+-import { getIO } from '../socket';
++import { ActivityLog, ActivityCategory, ActivitySeverity } from '../models/ActivityLog.js';
++import { InternCheckIn, CheckInStatus, WorkMode } from '../models/InternCheckIn.js';
++import { Intern } from '../models/Intern.js';
++import { Project } from '../models/Project.js';
++import { authenticate, requireAdmin } from '../middleware/auth.js';
++import { logActivity, logInternCheckInEvent, logInternCheckOutEvent } from '../services/activityLogger.js';
++import { getIO } from '../socket.js';
+ 
+ const router = Router();
+ 
+diff --git a/server/routes/adminRoutes.ts b/server/routes/adminRoutes.ts
+index 507408d..2725f57 100644
+--- a/server/routes/adminRoutes.ts
++++ b/server/routes/adminRoutes.ts
+@@ -1,7 +1,7 @@
+ import { Router, Request, Response } from 'express';
+ import bcrypt from 'bcryptjs';
+-import { Admin } from '../models/Admin';
+-import { requireAdmin } from '../middleware/auth';
++import { Admin } from '../models/Admin.js';
++import { requireAdmin } from '../middleware/auth.js';
+ 
+ const router = Router();
+ 
+diff --git a/server/routes/assignmentRoutes.ts b/server/routes/assignmentRoutes.ts
+index e509ac7..eb552d6 100644
+--- a/server/routes/assignmentRoutes.ts
++++ b/server/routes/assignmentRoutes.ts
+@@ -1,11 +1,11 @@
+ import { Router, Request, Response } from 'express';
+-import { ProjectAssignment } from '../models/ProjectAssignment';
+-import { Project } from '../models/Project';
+-import { Intern } from '../models/Intern';
+-import { Notification } from '../models/Notification';
+-import { requireAdmin, authenticate } from '../middleware/auth';
+-import { broadcastNotification } from '../socket';
+-import { sendAssignmentEmail } from '../services/emailService';
++import { ProjectAssignment } from '../models/ProjectAssignment.js';
++import { Project } from '../models/Project.js';
++import { Intern } from '../models/Intern.js';
++import { Notification } from '../models/Notification.js';
++import { requireAdmin, authenticate } from '../middleware/auth.js';
++import { broadcastNotification } from '../socket.js';
++import { sendAssignmentEmail } from '../services/emailService.js';
+ 
+ const router = Router();
+ 
+diff --git a/server/routes/authRoutes.ts b/server/routes/authRoutes.ts
+index 2bb0956..5015835 100644
+--- a/server/routes/authRoutes.ts
++++ b/server/routes/authRoutes.ts
+@@ -1,9 +1,9 @@
+ import { Router, Request, Response } from 'express';
+ import bcrypt from 'bcryptjs';
+-import { Admin } from '../models/Admin';
+-import { Intern } from '../models/Intern';
+-import { generateToken, authenticate } from '../middleware/auth';
+-import { seedDatabase } from '../services/seedService';
++import { Admin } from '../models/Admin.js';
++import { Intern } from '../models/Intern.js';
++import { generateToken, authenticate } from '../middleware/auth.js';
++import { seedDatabase } from '../services/seedService.js';
+ 
+ const router = Router();
+ 
+diff --git a/server/routes/emailRoutes.ts b/server/routes/emailRoutes.ts
+index de390ba..1b5d564 100644
+--- a/server/routes/emailRoutes.ts
++++ b/server/routes/emailRoutes.ts
+@@ -1,7 +1,7 @@
+ import { Router, Request, Response } from 'express';
+-import { EmailLog } from '../models/EmailLog';
+-import { requireAdmin } from '../middleware/auth';
+-import { sendAssignmentEmail } from '../services/emailService';
++import { EmailLog } from '../models/EmailLog.js';
++import { requireAdmin } from '../middleware/auth.js';
++import { sendAssignmentEmail } from '../services/emailService.js';
+ 
+ const router = Router();
+ 
+diff --git a/server/routes/exportRoutes.ts b/server/routes/exportRoutes.ts
+index 75d35a8..5d4cc27 100644
+--- a/server/routes/exportRoutes.ts
++++ b/server/routes/exportRoutes.ts
+@@ -5,8 +5,8 @@ import {
+   generateAssignmentsExcel,
+   generateWeeklyReportsExcel,
+   generateMonthlyReportsExcel,
+-} from '../services/excelService';
+-import { requireAdmin } from '../middleware/auth';
++} from '../services/excelService.js';
++import { requireAdmin } from '../middleware/auth.js';
+ 
+ const router = Router();
+ 
+diff --git a/server/routes/fileRoutes.ts b/server/routes/fileRoutes.ts
+index c9414b7..17808e3 100644
+--- a/server/routes/fileRoutes.ts
++++ b/server/routes/fileRoutes.ts
+@@ -1,6 +1,6 @@
+ import { Router, Request, Response } from 'express';
+ import mongoose from 'mongoose';
+-import { getGridFSBucket } from '../db/connection';
++import { getGridFSBucket } from '../db/connection.js';
+ 
+ const router = Router();
+ 
+diff --git a/server/routes/internRoutes.ts b/server/routes/internRoutes.ts
+index 56103e7..7e09b46 100644
+--- a/server/routes/internRoutes.ts
++++ b/server/routes/internRoutes.ts
+@@ -3,11 +3,11 @@ import bcrypt from 'bcryptjs';
+ import multer from 'multer';
+ import { Readable } from 'stream';
+ import mongoose from 'mongoose';
+-import { Intern } from '../models/Intern';
+-import { Notification } from '../models/Notification';
+-import { requireAdmin, authenticate } from '../middleware/auth';
+-import { getGridFSBucket } from '../db/connection';
+-import { broadcastNotification } from '../socket';
++import { Intern } from '../models/Intern.js';
++import { Notification } from '../models/Notification.js';
++import { requireAdmin, authenticate } from '../middleware/auth.js';
++import { getGridFSBucket } from '../db/connection.js';
++import { broadcastNotification } from '../socket.js';
+ 
+ const router = Router();
+ 
+diff --git a/server/routes/notificationRoutes.ts b/server/routes/notificationRoutes.ts
+index 4b49872..d8c3f0c 100644
+--- a/server/routes/notificationRoutes.ts
++++ b/server/routes/notificationRoutes.ts
+@@ -1,6 +1,6 @@
+ import { Router, Request, Response } from 'express';
+-import { Notification } from '../models/Notification';
+-import { authenticate } from '../middleware/auth';
++import { Notification } from '../models/Notification.js';
++import { authenticate } from '../middleware/auth.js';
+ 
+ const router = Router();
+ 
+diff --git a/server/routes/projectRoutes.ts b/server/routes/projectRoutes.ts
+index 6a81887..6b5005b 100644
+--- a/server/routes/projectRoutes.ts
++++ b/server/routes/projectRoutes.ts
+@@ -1,10 +1,10 @@
+ import { Router, Request, Response } from 'express';
+ import mongoose from 'mongoose';
+-import { Project } from '../models/Project';
+-import { ProjectAssignment } from '../models/ProjectAssignment';
+-import { Intern } from '../models/Intern';
+-import { requireAdmin, authenticate } from '../middleware/auth';
+-import { logActivity, logProjectUpdate } from '../services/activityLogger';
++import { Project } from '../models/Project.js';
++import { ProjectAssignment } from '../models/ProjectAssignment.js';
++import { Intern } from '../models/Intern.js';
++import { requireAdmin, authenticate } from '../middleware/auth.js';
++import { logActivity, logProjectUpdate } from '../services/activityLogger.js';
+ 
+ const router = Router();
+ 
+diff --git a/server/routes/reportRoutes.ts b/server/routes/reportRoutes.ts
+index ba87be0..951096b 100644
+--- a/server/routes/reportRoutes.ts
++++ b/server/routes/reportRoutes.ts
+@@ -1,14 +1,14 @@
+ import { Router, Request, Response } from 'express';
+ import multer from 'multer';
+ import { Readable } from 'stream';
+-import { Report, IUploadedFile } from '../models/Report';
+-import { Project } from '../models/Project';
+-import { Intern } from '../models/Intern';
+-import { Notification } from '../models/Notification';
+-import { requireAdmin, authenticate } from '../middleware/auth';
+-import { getGridFSBucket } from '../db/connection';
+-import { broadcastNotification } from '../socket';
+-import { logActivity } from '../services/activityLogger';
++import { Report, IUploadedFile } from '../models/Report.js';
++import { Project } from '../models/Project.js';
++import { Intern } from '../models/Intern.js';
++import { Notification } from '../models/Notification.js';
++import { requireAdmin, authenticate } from '../middleware/auth.js';
++import { getGridFSBucket } from '../db/connection.js';
++import { broadcastNotification } from '../socket.js';
++import { logActivity } from '../services/activityLogger.js';
+ 
+ const router = Router();
+ 
+diff --git a/server/routes/reportingCalendarRoutes.ts b/server/routes/reportingCalendarRoutes.ts
+index 445c9dc..70cc576 100644
+--- a/server/routes/reportingCalendarRoutes.ts
++++ b/server/routes/reportingCalendarRoutes.ts
+@@ -1,6 +1,6 @@
+ import { Router, Request, Response } from 'express';
+-import { getReportingCalendar, getMonthWeeks } from '../services/calendarService';
+-import { authenticate } from '../middleware/auth';
++import { getReportingCalendar, getMonthWeeks } from '../services/calendarService.js';
++import { authenticate } from '../middleware/auth.js';
+ 
+ const router = Router();
+ 
+diff --git a/server/services/activityLogger.ts b/server/services/activityLogger.ts
+index 487d4fb..54c9610 100644
+--- a/server/services/activityLogger.ts
++++ b/server/services/activityLogger.ts
+@@ -1,5 +1,5 @@
+-import { ActivityLog, ActivityCategory, ActivitySeverity, IActivityLog } from '../models/ActivityLog';
+-import { getIO } from '../socket';
++import { ActivityLog, ActivityCategory, ActivitySeverity, IActivityLog } from '../models/ActivityLog.js';
++import { getIO } from '../socket.js';
+ 
+ export interface LogEventOptions {
+   category: ActivityCategory;
+diff --git a/server/services/emailService.ts b/server/services/emailService.ts
+index c38e28b..e72b023 100644
+--- a/server/services/emailService.ts
++++ b/server/services/emailService.ts
+@@ -1,5 +1,5 @@
+ import nodemailer from 'nodemailer';
+-import { EmailLog } from '../models/EmailLog';
++import { EmailLog } from '../models/EmailLog.js';
+ 
+ export interface AssignmentEmailParams {
+   internName: string;
+diff --git a/server/services/excelService.ts b/server/services/excelService.ts
+index 60fdbea..10dea1e 100644
+--- a/server/services/excelService.ts
++++ b/server/services/excelService.ts
+@@ -1,8 +1,8 @@
+ import ExcelJS from 'exceljs';
+-import { Intern } from '../models/Intern';
+-import { Project } from '../models/Project';
+-import { ProjectAssignment } from '../models/ProjectAssignment';
+-import { Report } from '../models/Report';
++import { Intern } from '../models/Intern.js';
++import { Project } from '../models/Project.js';
++import { ProjectAssignment } from '../models/ProjectAssignment.js';
++import { Report } from '../models/Report.js';
+ 
+ // Header style helper for clean enterprise look
+ function applyHeaderStyle(row: ExcelJS.Row) {
+diff --git a/server/services/seedService.ts b/server/services/seedService.ts
+index 31e2bef..cd5b35e 100644
+--- a/server/services/seedService.ts
++++ b/server/services/seedService.ts
+@@ -1,80 +1,72 @@
+ import bcrypt from 'bcryptjs';
+-import { Admin } from '../models/Admin';
+-import { Intern } from '../models/Intern';
+-import { Project } from '../models/Project';
+-import { ProjectAssignment } from '../models/ProjectAssignment';
+-import { Report } from '../models/Report';
+-import { Notification } from '../models/Notification';
+-import { ActivityLog } from '../models/ActivityLog';
++import { Admin } from '../models/Admin.js';
++import { Intern } from '../models/Intern.js';
++import { Project } from '../models/Project.js';
++import { ProjectAssignment } from '../models/ProjectAssignment.js';
++import { Report } from '../models/Report.js';
++import { Notification } from '../models/Notification.js';
++import { ActivityLog } from '../models/ActivityLog.js';
+ 
+ export async function seedDatabase() {
+   console.log('[Seed] Verifying initial database collections for Phoenix Tech Solutions...');
+ 
+-  // Admin 1 - Y D Mahendhra (CEO)
+-  const admin1Id = process.env.ADMIN1_ID || 'PTS-CEO-001';
+-  const admin1Name = process.env.ADMIN1_NAME || 'Y D Mahendhra';
+-  const admin1Username = (process.env.ADMIN1_USERNAME || 'Mahendhra').toLowerCase();
+-  const admin1Email = (process.env.ADMIN1_EMAIL || 'mahendhra2005@gamil.com').toLowerCase();
+-  const admin1Password = process.env.ADMIN1_PASSWORD || 'ydm@1962';
++  const admins = [
++    {
++      adminId: process.env.ADMIN1_ID || 'PTS-CEO-001',
++      name: process.env.ADMIN1_NAME || 'Y D Mahendhra',
++      username: (process.env.ADMIN1_USERNAME || 'Mahendhra').toLowerCase(),
++      email: (process.env.ADMIN1_EMAIL || '').toLowerCase(),
++      password: process.env.ADMIN1_PASSWORD || '',
++      designation: 'Chief Executive Officer (CEO)',
++      department: 'Executive Leadership & Project Operations',
++    },
++    {
++      adminId: process.env.ADMIN2_ID || 'PTS-COO-001',
++      name: process.env.ADMIN2_NAME || 'P Praveen Kumar',
++      username: (process.env.ADMIN2_USERNAME || 'Praveen').toLowerCase(),
++      email: (process.env.ADMIN2_EMAIL || '').toLowerCase(),
++      password: process.env.ADMIN2_PASSWORD || '',
++      designation: 'Chief Operating Officer (COO)',
++      department: 'Operations & Technical Oversight',
++    },
++  ];
++  const syncPasswords = process.env.ADMIN_SYNC_PASSWORDS === 'true';
+ 
+-  // Admin 2 - P Praveen Kumar (COO)
+-  const admin2Id = process.env.ADMIN2_ID || 'PTS-COO-001';
+-  const admin2Name = process.env.ADMIN2_NAME || 'P Praveen Kumar';
+-  const admin2Username = (process.env.ADMIN2_USERNAME || 'Praveen').toLowerCase();
+-  const admin2Email = (process.env.ADMIN2_EMAIL || 'praveenpraba399@gamil.com').toLowerCase();
+-  const admin2Password = process.env.ADMIN2_PASSWORD || 'sasipravveen';
+-
+-  const salt1 = await bcrypt.genSalt(10);
+-  const hash1 = await bcrypt.hash(admin1Password, salt1);
+-
+-  const salt2 = await bcrypt.genSalt(10);
+-  const hash2 = await bcrypt.hash(admin2Password, salt2);
+-
+-  try {
+-    await Admin.deleteMany({});
+-    await Admin.create([
+-      {
+-        adminId: admin1Id,
+-        name: admin1Name,
+-        username: admin1Username,
+-        email: admin1Email,
+-        passwordHash: hash1,
+-        contactNumber: '+91 98765 43210',
+-        designation: 'Chief Executive Officer (CEO)',
+-        department: 'Executive Leadership & Project Operations',
+-        contactInfo: 'Executive Office · Email: ' + admin1Email,
+-        role: 'admin',
+-        accountStatus: 'active',
+-      },
+-      {
+-        adminId: admin2Id,
+-        name: admin2Name,
+-        username: admin2Username,
+-        email: admin2Email,
+-        passwordHash: hash2,
+-        contactNumber: '+91 98765 43211',
+-        designation: 'Chief Operating Officer (COO)',
+-        department: 'Operations & Technical Oversight',
+-        contactInfo: 'Executive Office · Email: ' + admin2Email,
+-        role: 'admin',
+-        accountStatus: 'active',
+-      },
+-    ]);
+-    console.log(`[Seed] Successfully seeded Admin 1 (${admin1Id} / ${admin1Email}) and Admin 2 (${admin2Id} / ${admin2Email}).`);
+-  } catch (adminErr: any) {
+-    console.error('[Seed Error] Failed to seed authorized admins:', adminErr?.message || adminErr);
+-  }
+-
+-  // Complete demo cleanup per Section 7
+-  try {
+-    await Intern.deleteMany({});
+-    await Project.deleteMany({});
+-    await ProjectAssignment.deleteMany({});
+-    await Report.deleteMany({});
+-    await Notification.deleteMany({});
+-  } catch (cleanupErr: any) {
+-    console.warn('[Seed Cleanup] Notice during demo cleanup:', cleanupErr?.message);
++  // Idempotent: never deletes existing data. Creates missing admins and keeps
++  // existing passwords unless ADMIN_SYNC_PASSWORDS=true.
++  for (const a of admins) {
++    try {
++      const existing = await Admin.findOne({ adminId: a.adminId });
++      if (!existing) {
++        if (!a.password || !a.email) {
++          console.warn(`[Seed] Skipping ${a.adminId}: ADMIN*_EMAIL and ADMIN*_PASSWORD env vars are not set.`);
++          continue;
++        }
++        await Admin.create({
++          adminId: a.adminId,
++          name: a.name,
++          username: a.username,
++          email: a.email,
++          passwordHash: await bcrypt.hash(a.password, 10),
++          designation: a.designation,
++          department: a.department,
++          contactInfo: 'Executive Office · Email: ' + a.email,
++          role: 'admin',
++          accountStatus: 'active',
++        });
++        console.log(`[Seed] Created admin ${a.adminId}.`);
++      } else if (syncPasswords && a.password) {
++        existing.passwordHash = await bcrypt.hash(a.password, 10);
++        await existing.save();
++        console.log(`[Seed] Password re-synced for admin ${a.adminId}.`);
++      }
++    } catch (adminErr: any) {
++      console.error(`[Seed Error] Failed to seed admin ${a.adminId}:`, adminErr?.message || adminErr);
++    }
+   }
++  const admin1Id = admins[0].adminId;
++  const admin1Name = admins[0].name;
++  const admin2Id = admins[1].adminId;
+ 
+   // Seed initial system logs if empty
+   try {
+@@ -121,5 +113,5 @@ export async function seedDatabase() {
+     console.warn('[Seed] Notice during initial activity logs creation:', logErr?.message);
+   }
+ 
+-  console.log('[Seed] Database initialization complete: Pristine workspace ready with exactly 2 authorized Admins.');
++  console.log('[Seed] Database initialization complete: admin accounts verified.');
+ }
+diff --git a/vercel.json b/vercel.json
+new file mode 100644
+index 0000000..218676c
+--- /dev/null
++++ b/vercel.json
+@@ -0,0 +1,9 @@
++{
++  "rewrites": [
++    { "source": "/api/(.*)", "destination": "/api" },
++    { "source": "/((?!api/).*)", "destination": "/index.html" }
++  ],
++  "functions": {
++    "api/index.ts": { "maxDuration": 30 }
++  }
++}
+-- 
+2.43.0
+
