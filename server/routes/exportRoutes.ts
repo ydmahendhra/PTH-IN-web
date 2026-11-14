@@ -5,8 +5,8 @@ import {
   generateAssignmentsExcel,
   generateWeeklyReportsExcel,
   generateMonthlyReportsExcel,
-} from '../services/excelService';
-import { requireAdmin } from '../middleware/auth';
+} from '../services/excelService.js';
+import { requireAdmin } from '../middleware/auth.js';
 
 const router = Router();
 

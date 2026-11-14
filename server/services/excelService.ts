@@ -1,8 +1,8 @@
 import ExcelJS from 'exceljs';
-import { Intern } from '../models/Intern';
-import { Project } from '../models/Project';
-import { ProjectAssignment } from '../models/ProjectAssignment';
-import { Report } from '../models/Report';
+import { Intern } from '../models/Intern.js';
+import { Project } from '../models/Project.js';
+import { ProjectAssignment } from '../models/ProjectAssignment.js';
+import { Report } from '../models/Report.js';
 
 // Header style helper for clean enterprise look
 function applyHeaderStyle(row: ExcelJS.Row) {

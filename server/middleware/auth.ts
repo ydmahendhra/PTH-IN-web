@@ -1,7 +1,14 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'nexus_enterprise_jwt_secret_key_2027';
+const JWT_SECRET = process.env.JWT_SECRET || '';
+if (!JWT_SECRET) {
+  if (process.env.NODE_ENV === 'production' || process.env.VERCEL) {
+    throw new Error('JWT_SECRET environment variable is required.');
+  }
+  console.warn('[Auth] JWT_SECRET not set; using an insecure development-only secret.');
+}
+const SIGNING_SECRET = JWT_SECRET || 'dev-only-insecure-secret';
 
 export interface AuthUser {
   id: string; // adminId or internId
@@ -20,12 +27,12 @@ declare global {
 }
 
 export function generateToken(user: AuthUser): string {
-  return jwt.sign(user, JWT_SECRET, { expiresIn: '7d' });
+  return jwt.sign(user, SIGNING_SECRET, { expiresIn: '7d' });
 }
 
 export function verifyToken(token: string): AuthUser | null {
   try {
-    return jwt.verify(token, JWT_SECRET) as AuthUser;
+    return jwt.verify(token, SIGNING_SECRET) as AuthUser;
   } catch {
     return null;
   }

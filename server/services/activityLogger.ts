@@ -1,5 +1,5 @@
-import { ActivityLog, ActivityCategory, ActivitySeverity, IActivityLog } from '../models/ActivityLog';
-import { getIO } from '../socket';
+import { ActivityLog, ActivityCategory, ActivitySeverity, IActivityLog } from '../models/ActivityLog.js';
+import { getIO } from '../socket.js';
 
 export interface LogEventOptions {
   category: ActivityCategory;

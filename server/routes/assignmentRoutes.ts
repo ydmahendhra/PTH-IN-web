@@ -1,11 +1,11 @@
 import { Router, Request, Response } from 'express';
-import { ProjectAssignment } from '../models/ProjectAssignment';
-import { Project } from '../models/Project';
-import { Intern } from '../models/Intern';
-import { Notification } from '../models/Notification';
-import { requireAdmin, authenticate } from '../middleware/auth';
-import { broadcastNotification } from '../socket';
-import { sendAssignmentEmail } from '../services/emailService';
+import { ProjectAssignment } from '../models/ProjectAssignment.js';
+import { Project } from '../models/Project.js';
+import { Intern } from '../models/Intern.js';
+import { Notification } from '../models/Notification.js';
+import { requireAdmin, authenticate } from '../middleware/auth.js';
+import { broadcastNotification } from '../socket.js';
+import { sendAssignmentEmail } from '../services/emailService.js';
 
 const router = Router();
 

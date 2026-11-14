@@ -1,12 +1,12 @@
 import { Router, Request, Response } from 'express';
 import mongoose from 'mongoose';
-import { ActivityLog, ActivityCategory, ActivitySeverity } from '../models/ActivityLog';
-import { InternCheckIn, CheckInStatus, WorkMode } from '../models/InternCheckIn';
-import { Intern } from '../models/Intern';
-import { Project } from '../models/Project';
-import { authenticate, requireAdmin } from '../middleware/auth';
-import { logActivity, logInternCheckInEvent, logInternCheckOutEvent } from '../services/activityLogger';
-import { getIO } from '../socket';
+import { ActivityLog, ActivityCategory, ActivitySeverity } from '../models/ActivityLog.js';
+import { InternCheckIn, CheckInStatus, WorkMode } from '../models/InternCheckIn.js';
+import { Intern } from '../models/Intern.js';
+import { Project } from '../models/Project.js';
+import { authenticate, requireAdmin } from '../middleware/auth.js';
+import { logActivity, logInternCheckInEvent, logInternCheckOutEvent } from '../services/activityLogger.js';
+import { getIO } from '../socket.js';
 
 const router = Router();
 

@@ -1,10 +1,10 @@
 import { Router, Request, Response } from 'express';
 import mongoose from 'mongoose';
-import { Project } from '../models/Project';
-import { ProjectAssignment } from '../models/ProjectAssignment';
-import { Intern } from '../models/Intern';
-import { requireAdmin, authenticate } from '../middleware/auth';
-import { logActivity, logProjectUpdate } from '../services/activityLogger';
+import { Project } from '../models/Project.js';
+import { ProjectAssignment } from '../models/ProjectAssignment.js';
+import { Intern } from '../models/Intern.js';
+import { requireAdmin, authenticate } from '../middleware/auth.js';
+import { logActivity, logProjectUpdate } from '../services/activityLogger.js';
 
 const router = Router();
 

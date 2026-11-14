@@ -75,7 +75,8 @@ async function startEmbeddedMongoDB(): Promise<void> {
   const dbDir = path.resolve(process.cwd(), '.mongodb_data');
   sanitizeMongoDataDir(dbDir);
 
-  const { MongoMemoryServer } = await import('mongodb-memory-server');
+  const memModule = 'mongodb-memory-server'; // non-literal so bundlers/tracers skip it on Vercel
+  const { MongoMemoryServer } = await import(memModule);
 
   // Attempt 1: Persistent WiredTiger storage on disk
   try {
@@ -136,6 +137,10 @@ export async function connectDB(): Promise<typeof mongoose> {
   const rawUri = process.env.MONGODB_URI;
   let connected = false;
 
+  if (process.env.VERCEL && !isValidMongoUri(rawUri)) {
+    throw new Error('MONGODB_URI is missing or invalid. Set your MongoDB Atlas connection string in Vercel.');
+  }
+
   if (isValidMongoUri(rawUri)) {
     const uri = rawUri!.trim();
     console.log('[MongoDB] Attempting connection to configured MONGODB_URI...');
@@ -147,6 +152,10 @@ export async function connectDB(): Promise<typeof mongoose> {
       console.log('[MongoDB] Connected successfully to configured MONGODB_URI.');
       connected = true;
     } catch (err: any) {
+      if (process.env.VERCEL || process.env.NODE_ENV === 'production') {
+        // Never fall back to a throwaway database in production.
+        throw err;
+      }
       console.warn(`[MongoDB] Could not connect to configured MONGODB_URI (${err?.message || err}). Falling back to embedded MongoDB...`);
       connected = false;
     }

@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
-import { Admin } from '../models/Admin';
-import { requireAdmin } from '../middleware/auth';
+import { Admin } from '../models/Admin.js';
+import { requireAdmin } from '../middleware/auth.js';
 
 const router = Router();
 

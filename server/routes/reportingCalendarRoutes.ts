@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
-import { getReportingCalendar, getMonthWeeks } from '../services/calendarService';
-import { authenticate } from '../middleware/auth';
+import { getReportingCalendar, getMonthWeeks } from '../services/calendarService.js';
+import { authenticate } from '../middleware/auth.js';
 
 const router = Router();
 
