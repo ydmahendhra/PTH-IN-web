@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
-import { EmailLog } from '../models/EmailLog';
-import { requireAdmin } from '../middleware/auth';
-import { sendAssignmentEmail } from '../services/emailService';
+import { EmailLog } from '../models/EmailLog.js';
+import { requireAdmin } from '../middleware/auth.js';
+import { sendAssignmentEmail } from '../services/emailService.js';
 
 const router = Router();
 

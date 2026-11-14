@@ -1,5 +1,5 @@
 import nodemailer from 'nodemailer';
-import { EmailLog } from '../models/EmailLog';
+import { EmailLog } from '../models/EmailLog.js';
 
 export interface AssignmentEmailParams {
   internName: string;

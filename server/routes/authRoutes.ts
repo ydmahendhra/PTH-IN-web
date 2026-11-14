@@ -1,9 +1,9 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
-import { Admin } from '../models/Admin';
-import { Intern } from '../models/Intern';
-import { generateToken, authenticate } from '../middleware/auth';
-import { seedDatabase } from '../services/seedService';
+import { Admin } from '../models/Admin.js';
+import { Intern } from '../models/Intern.js';
+import { generateToken, authenticate } from '../middleware/auth.js';
+import { seedDatabase } from '../services/seedService.js';
 
 const router = Router();
 

@@ -3,11 +3,11 @@ import bcrypt from 'bcryptjs';
 import multer from 'multer';
 import { Readable } from 'stream';
 import mongoose from 'mongoose';
-import { Intern } from '../models/Intern';
-import { Notification } from '../models/Notification';
-import { requireAdmin, authenticate } from '../middleware/auth';
-import { getGridFSBucket } from '../db/connection';
-import { broadcastNotification } from '../socket';
+import { Intern } from '../models/Intern.js';
+import { Notification } from '../models/Notification.js';
+import { requireAdmin, authenticate } from '../middleware/auth.js';
+import { getGridFSBucket } from '../db/connection.js';
+import { broadcastNotification } from '../socket.js';
 
 const router = Router();
 

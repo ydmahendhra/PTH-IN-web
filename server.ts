@@ -2,60 +2,19 @@ import express from 'express';
 import http from 'http';
 import path from 'path';
 import dotenv from 'dotenv';
-import { connectDB } from './server/db/connection';
-import { seedDatabase } from './server/services/seedService';
-import { initSocketIO } from './server/socket';
+import { connectDB } from './server/db/connection.js';
+import { seedDatabase } from './server/services/seedService.js';
+import { initSocketIO } from './server/socket.js';
 
-// Route imports
-import authRoutes from './server/routes/authRoutes';
-import adminRoutes from './server/routes/adminRoutes';
-import internRoutes from './server/routes/internRoutes';
-import projectRoutes from './server/routes/projectRoutes';
-import assignmentRoutes from './server/routes/assignmentRoutes';
-import reportRoutes from './server/routes/reportRoutes';
-import reportingCalendarRoutes from './server/routes/reportingCalendarRoutes';
-import notificationRoutes from './server/routes/notificationRoutes';
-import exportRoutes from './server/routes/exportRoutes';
-import fileRoutes from './server/routes/fileRoutes';
-import emailRoutes from './server/routes/emailRoutes';
-import activityRoutes from './server/routes/activityRoutes';
+import app from './server/app.js';
 
 dotenv.config();
 
-const app = express();
 const server = http.createServer(app);
 const PORT = 3000;
 
-// Body parsing middleware
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-
 // Initialize Socket.IO gateway
 initSocketIO(server);
-
-// Mount REST API Endpoints
-app.use('/api/auth', authRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/activity', activityRoutes);
-app.use('/api/interns', internRoutes);
-app.use('/api/projects', projectRoutes);
-app.use('/api/assignments', assignmentRoutes);
-app.use('/api/reports', reportRoutes);
-app.use('/api/reporting', reportingCalendarRoutes);
-app.use('/api/notifications', notificationRoutes);
-app.use('/api/export', exportRoutes);
-app.use('/api/files', fileRoutes);
-app.use('/api/emails', emailRoutes);
-
-// Health check endpoint
-app.get('/api/health', (_req, res) => {
-  res.json({
-    status: 'healthy',
-    system: 'NexusProject Full-Stack Server',
-    database: 'MongoDB GridFS Operational',
-    timestamp: new Date().toISOString(),
-  });
-});
 
 async function startServer() {
   try {
